@@ -1,204 +1,266 @@
-import os
 import sys
-import logging
-import contextlib
-import io
-from yt_dlp import YoutubeDL
-from rich.console import Console
-from rich.logging import RichHandler
-from rich.progress import (
-    Progress,
-    BarColumn,
-    DownloadColumn,
-    TransferSpeedColumn,
-    TimeRemainingColumn,
-)
+import subprocess
+import json
+from pathlib import Path
 
-console = Console()
+
+def get_base_dir():
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent
+
+
+def get_default_download_dir():
+    """Get the system's Downloads folder"""
+    try:
+        # Try to get user's Downloads folder (works on Windows, Linux, macOS)
+        import os
+        if sys.platform == "win32":
+            # Windows
+            downloads = Path.home() / "Downloads"
+        else:
+            # Linux/macOS
+            downloads = Path.home() / "Downloads"
+
+        # Create if it doesn't exist
+        downloads.mkdir(parents=True, exist_ok=True)
+        return downloads
+    except:
+        # Fallback to current directory if Downloads folder can't be accessed
+        return Path.cwd()
+
+
+def get_bin_paths():
+    base_dir = get_base_dir()
+    bin_dir = base_dir / "bin"
+    return bin_dir / "yt-dlp.exe", bin_dir / "ffmpeg.exe"
 
 
 class YTVideoDownloader:
     def __init__(
-        self, progress_hook=None, use_rich=True, browsers=None, download_dir=None
+        self, progress_hook=None, use_rich=False, browsers=None, download_dir=None
     ):
-        # Resource path (ffmpeg, icons)
-        if hasattr(sys, "_MEIPASS"):
-            self.resource_path = sys._MEIPASS
-        else:
-            self.resource_path = os.path.dirname(os.path.abspath(sys.argv[0]))
-
-        # Output path (downloads, logs) - always next to the executable
-        if getattr(sys, "frozen", False):
-            self.output_path = os.path.dirname(sys.executable)
-        else:
-            self.output_path = os.path.dirname(os.path.abspath(__file__))
-
-        os.chdir(self.output_path)
-
-        # Determine download directory
-        if download_dir:
-            self.download_dir = download_dir
-        else:
-            # Default download dir next to executable/script
-            self.download_dir = os.path.join(self.output_path, "downloaded_videos")
-
-        os.makedirs(self.download_dir, exist_ok=True)
-
-        self.log_path = os.path.join(self.output_path, "youtube_downloader.log")
-        self.setup_logger()
-
+        self.progress_hook = progress_hook
         self.use_rich = use_rich
-        self.external_hook = progress_hook
-        self.progress = None
         self.browsers = browsers if browsers else []
 
-        if self.use_rich:
-            self.progress = Progress(
-                "[progress.description]{task.description}",
-                BarColumn(),
-                DownloadColumn(),
-                TransferSpeedColumn(),
-                TimeRemainingColumn(),
-                console=console,
-                transient=True,
+        if download_dir:
+            self.download_dir = Path(download_dir)
+        else:
+            # Default to system's Downloads folder
+            self.download_dir = get_default_download_dir()
+
+        self.download_dir.mkdir(parents=True, exist_ok=True)
+
+    def get_formats(self, url):
+        try:
+            yt_dlp, _ = get_bin_paths()
+
+            if not yt_dlp.exists():
+                return {
+                    "status": False,
+                    "message": "yt-dlp.exe not found in bin folder",
+                }
+
+            cmd = [str(yt_dlp), url, "-J"]
+
+            if self.browsers:
+                for browser in self.browsers:
+                    cmd.extend(["--cookies-from-browser", browser])
+
+            # Hide console window on Windows
+            startupinfo = None
+            if sys.platform == "win32":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, check=True, timeout=60,
+                startupinfo=startupinfo
             )
 
-    def setup_logger(self):
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(message)s",
-            handlers=[
-                RichHandler(
-                    console=console, show_time=False, show_level=False, show_path=False
-                ),
-                logging.FileHandler(self.log_path, mode="a", encoding="utf-8"),
-            ],
-        )
-        self.logger = logging.getLogger("YTLogger")
+            info = json.loads(result.stdout)
+            formats = info.get("formats", [])
 
-    def get_formats(self, url: str) -> dict:
-        self.logger.info(f"Attempting to fetch formats for: {url}")
-        formats_list = []
-        info = None
-        ydl_opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "logger": self.logger,
-            "socket_timeout": 30,
-            "retries": 1,
-            "extract_flat": "discard_in_playlist",
-            "noplaylist": True,
-            "geo_bypass": True,
-            "age_limit": None,
-            "cookiesfrombrowser": self.browsers if self.browsers else None,
-        }
-        try:
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                if info and "formats" in info:
-                    formats_list = info["formats"]
-                    self.logger.info(
-                        f"Successfully fetched {len(formats_list)} format entries."
-                    )
-                else:
-                    self.logger.warning("No formats found in extracted info.")
-
-            return {"status": True, "formats": formats_list, "info": info}
+            return {"status": True, "formats": formats, "info": info}
+        except subprocess.TimeoutExpired:
+            return {"status": False, "message": "Request timed out"}
+        except subprocess.CalledProcessError as e:
+            return {"status": False, "message": f"Failed to fetch formats: {e.stderr}"}
+        except json.JSONDecodeError:
+            return {"status": False, "message": "Failed to parse format data"}
         except Exception as e:
-            self.logger.error(f"Failed to fetch formats: {e}")
-            return {"status": False, "message": f"Failed to fetch formats: {e}"}
+            return {"status": False, "message": str(e)}
 
-    def download_video(self, url: str, format_string: str | None = None) -> dict:
-        ffmpeg_path = os.path.join(self.resource_path, "ffmpeg", "ffmpeg.exe")
-        final_path = {"file": None}
-        task_id = [None]
-
-        def default_progress(d):
-            if d.get("status") == "downloading":
-                if not self.use_rich:
-                    if d.get("filename"):
-                        final_path["file"] = d["filename"]
-                    return
-
-                if task_id[0] is None:
-                    filename = os.path.basename(d.get("filename", "video"))
-                    task_id[0] = self.progress.add_task(
-                        f"Downloading: {filename}", total=d.get("total_bytes", 0)
-                    )
-                self.progress.update(task_id[0], completed=d.get("downloaded_bytes", 0))
-                if d.get("filename"):
-                    final_path["file"] = d["filename"]
-            elif d.get("status") == "finished":
-                if d.get("filename"):
-                    final_path["file"] = d["filename"]
-                elif d.get("filepath"):
-                    final_path["file"] = d["filepath"]
-                if self.use_rich and self.progress:
-                    self.progress.stop()
-
-        effective_format = (
-            format_string or "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
-        )
-        self.logger.info(f"Using format selection: {effective_format}")
-
-        ydl_opts = {
-            "format": effective_format,
-            "merge_output_format": "mp4",
-            "outtmpl": os.path.join(self.download_dir, "%(title)s.%(ext)s"),
-            "ffmpeg_location": ffmpeg_path,
-            "progress_hooks": [self.external_hook or default_progress],
-            "quiet": True,
-            "no_warnings": True,
-            "socket_timeout": 30,
-            "retries": 3,
-            "fragment_retries": 3,
-            "extractor_retries": 3,
-            "noplaylist": True,
-            "geo_bypass": True,
-            "age_limit": None,
-            "logger": self.logger,
-            "progress_with_newline": False,
-            "consoletitle": False,
-        }
-
-        if self.browsers:
-            self.logger.info(f"Attempting to use cookies from: {self.browsers}")
-            ydl_opts["cookiesfrombrowser"] = self.browsers
-        else:
-            self.logger.info("Cookies not requested.")
-
+    def download_video(self, url, format_string=None):
         try:
-            with YoutubeDL(ydl_opts) as ydl:
-                if self.use_rich and self.progress:
-                    with self.progress:
-                        with contextlib.redirect_stdout(io.StringIO()):
-                            ydl.download([url])
-                else:
-                    with contextlib.redirect_stdout(io.StringIO()):
-                        ydl.download([url])
+            yt_dlp, ffmpeg = get_bin_paths()
 
-            if not final_path["file"]:
-                files = sorted(
-                    [f for f in os.listdir(self.download_dir) if f.endswith(".mp4")],
-                    key=lambda f: os.path.getmtime(os.path.join(self.download_dir, f)),
-                    reverse=True,
-                )
-                if files:
-                    final_path["file"] = os.path.join(self.download_dir, files[0])
+            if not yt_dlp.exists():
+                return {
+                    "status": False,
+                    "message": "yt-dlp.exe not found",
+                    "filepath": None,
+                }
 
-            return {
-                "status": True,
-                "message": "Download succeeded",
-                "filepath": final_path["file"],
-            }
+            cmd = [
+                str(yt_dlp),
+                url,
+                "-o",
+                str(self.download_dir / "%(title)s.%(ext)s"),
+                "--newline",
+                "--progress",
+                "--extractor-args",
+                "youtube:player_client=default,web",
+            ]
 
-        except Exception as e:
-            self.logger.error(f">= Download failed: {e}")
-            error_message = f"Download failed: {e}"
             if self.browsers:
-                error_message += f" (Tried using cookies from: {self.browsers})"
+                for browser in self.browsers:
+                    cmd.extend(["--cookies-from-browser", browser])
+
+            is_audio_conversion = format_string in ["mp3", "wav"]
+
+            if ffmpeg.exists():
+                cmd.extend(["--ffmpeg-location", str(ffmpeg.parent)])
+            elif is_audio_conversion:
+                return {
+                    "status": False,
+                    "message": "ffmpeg.exe not found (required for audio conversion)",
+                    "filepath": None,
+                }
+
+            if is_audio_conversion:
+                cmd.extend(
+                    ["-x", "--audio-format", format_string, "--audio-quality", "0"]
+                )
+                cmd.extend(["--add-metadata"])
+            else:
+                if format_string:
+                    cmd.extend(["-f", format_string])
+                else:
+                    cmd.extend(["-f", "bestvideo+bestaudio/best"])
+                cmd.extend(
+                    [
+                        "--merge-output-format",
+                        "mp4",
+                        "--add-metadata",
+                        "--embed-thumbnail",
+                    ]
+                )
+
+            # Hide console window on Windows
+            startupinfo = None
+            if sys.platform == "win32":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                startupinfo=startupinfo
+            )
+
+            current_file = None
+            error_output = []
+            for line in process.stdout:
+                # Removed print() to prevent console window from appearing
+
+                if "ERROR:" in line or "WARNING:" in line:
+                    error_output.append(line.strip())
+
+                if self.progress_hook:
+                    progress_data = {
+                        "status": "downloading",
+                        "percent": 0,
+                        "speed": 0,
+                        "downloaded": 0,
+                        "total": 0,
+                        "filename": None,
+                    }
+
+                    if "[download]" in line and "%" in line:
+                        parts = line.split()
+                        for i, part in enumerate(parts):
+                            if "%" in part:
+                                try:
+                                    progress_data["percent"] = int(
+                                        float(part.strip("%"))
+                                    )
+                                except:
+                                    pass
+                            if "MiB" in part or "KiB" in part or "GiB" in part:
+                                try:
+                                    if i > 0 and "of" in parts[i - 1]:
+                                        size_parts = parts[i - 2 : i + 1]
+                                        progress_data["downloaded"] = self._parse_size(
+                                            size_parts[0]
+                                        )
+                                        progress_data["total"] = self._parse_size(
+                                            size_parts[2]
+                                        )
+                                except:
+                                    pass
+
+                    if "[download] Destination:" in line:
+                        current_file = line.split("Destination:")[-1].strip()
+                        progress_data["filename"] = current_file
+
+                    if "[ExtractAudio]" in line or "[ffmpeg]" in line:
+                        progress_data["status"] = "converting"
+
+                    self.progress_hook(progress_data)
+
+            process.wait()
+
+            if process.returncode == 0:
+                if not current_file:
+                    files = list(self.download_dir.glob("*.*"))
+                    if files:
+                        current_file = str(max(files, key=lambda p: p.stat().st_mtime))
+
+                if self.progress_hook:
+                    self.progress_hook({"status": "finished", "filename": current_file})
+
+                return {
+                    "status": True,
+                    "message": "Download succeeded",
+                    "filepath": current_file,
+                }
+            else:
+                error_msg = "Download failed"
+                if error_output:
+                    error_msg += f": {'; '.join(error_output[:3])}"
+                return {"status": False, "message": error_msg, "filepath": None}
+
+        except subprocess.TimeoutExpired:
+            return {"status": False, "message": "Download timed out", "filepath": None}
+        except FileNotFoundError:
             return {
                 "status": False,
-                "message": error_message,
+                "message": "yt-dlp.exe not found or cannot be executed",
                 "filepath": None,
             }
+        except Exception as e:
+            return {
+                "status": False,
+                "message": f"Download failed: {e}",
+                "filepath": None,
+            }
+
+    def _parse_size(self, size_str):
+        try:
+            size_str = size_str.strip()
+            if "GiB" in size_str:
+                return float(size_str.replace("GiB", "")) * 1024 * 1024 * 1024
+            elif "MiB" in size_str:
+                return float(size_str.replace("MiB", "")) * 1024 * 1024
+            elif "KiB" in size_str:
+                return float(size_str.replace("KiB", "")) * 1024
+            return 0
+        except:
+            return 0

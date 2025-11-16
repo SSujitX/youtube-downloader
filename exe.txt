@@ -1,3 +1,11 @@
-pyinstaller --noconfirm --onedir --windowed --icon "yt.ico" --add-data "yt.png;." --add-data "ffmpeg;ffmpeg" youtube_downloader.py
+# Recommended: Use --onedir to allow yt-dlp updates
+# Build steps:
+# 1. Run PyInstaller command below
+# 2. Create bin folder: mkdir dist\youtube_downloader\bin
+# 3. Copy ffmpeg.exe to dist\youtube_downloader\bin\
+# 4. (Optional) Copy yt-dlp.exe to dist\youtube_downloader\bin\
+# 5. Compile Inno Setup script to create installer
+pyinstaller --noconfirm --onedir --windowed --icon "yt.ico" --add-data "yt.png;." youtube_downloader.py
 
-pyinstaller --noconfirm --onefile --windowed --icon "yt.ico" --add-data "yt.png;." --add-data "ffmpeg;ffmpeg" youtube_downloader.py
+# Alternative: Single file (but yt-dlp updates won't work easily)
+# pyinstaller --noconfirm --onefile --windowed --icon "yt.ico" --add-data "yt.png;." youtube_downloader.py

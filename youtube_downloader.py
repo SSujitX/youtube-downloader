@@ -2,6 +2,7 @@ import os
 import sys
 import subprocess
 import re
+from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication,
     QWidget,
@@ -28,6 +29,7 @@ from PyQt6.QtGui import (
 )  # Import QAction if needed for custom actions, though standard ones exist
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from downloader import YTVideoDownloader
+from yt_dlp_downloader import download_yt_dlp, get_latest_version
 
 
 # --- Format Fetch Thread --- (NEW)
@@ -52,6 +54,25 @@ class FormatFetchThread(QThread):
 
 
 # --- End Format Fetch Thread ---
+
+
+# --- Update yt-dlp Thread --- (NEW)
+class UpdateYTDLPThread(QThread):
+    update_progress = pyqtSignal(str)
+    update_finished = pyqtSignal(bool, str)
+
+    def run(self):
+        try:
+            self.update_progress.emit("Checking for latest version...")
+            version = get_latest_version()
+            self.update_progress.emit(f"Downloading yt-dlp {version}...")
+            result = download_yt_dlp()
+            self.update_finished.emit(True, f"Successfully updated to {version}")
+        except Exception as e:
+            self.update_finished.emit(False, f"Update failed: {str(e)}")
+
+
+# --- End Update Thread ---
 
 
 # --- Download Thread --- (Modified)
@@ -132,8 +153,12 @@ class YouTubeDownloaderApp(QWidget):
         else:
             self.base_path = os.path.dirname(os.path.abspath(__file__))
 
-        # Download directory attribute
-        self.current_download_dir = os.path.join(self.base_path, "downloaded_videos")
+        # Download directory attribute - default to system's Downloads folder
+        try:
+            self.current_download_dir = str(Path.home() / "Downloads")
+        except:
+            # Fallback if Downloads folder can't be accessed
+            self.current_download_dir = os.path.join(self.base_path, "downloaded_videos")
 
         # Resource path setup
         if hasattr(sys, "_MEIPASS"):
@@ -156,6 +181,7 @@ class YouTubeDownloaderApp(QWidget):
         self.download_thread = None
         self.fetched_formats = []
         self.current_video_title = None
+        self.files_before_download = set()
         self.init_ui()
 
     def init_ui(self):
@@ -168,11 +194,12 @@ class YouTubeDownloaderApp(QWidget):
         intro_label.setStyleSheet(
             """
             QLabel#IntroLabel {
-                border: 1px solid #8f9dc2;
+                border: 1px solid #00d4ff;
                 border-radius: 15px;
-                color: #333;
+                color: #e0e0e0;
                 font-family: Arial, sans-serif;
                 padding: 10px;
+                background-color: #1a1d29;
             }
         """
         )
@@ -181,18 +208,18 @@ class YouTubeDownloaderApp(QWidget):
             """
             <div style="text-align: center;">
                 <!-- New inner div for the border and background -->
-                <div style="border: 1px solid #80deea; border-radius: 8px;  padding: 15px; display: inline-block;">
-                    <div style="font-size: 18pt; font-weight: 600; color: #004d40;">
+                <div style="border: 1px solid #00d4ff; border-radius: 8px;  padding: 15px; display: inline-block; background-color: #1a1d29;">
+                    <div style="font-size: 18pt; font-weight: 600; color: #00d4ff;">
                     YouTube Downloader
                 </div>
-                    <div style="font-size: 10pt; color: #6e4414; margin-top: 5px;">
-                        Developed by Sujit - 
+                    <div style="font-size: 10pt; color: #a0aec0; margin-top: 5px;">
+                        Developed by Sujit -
                         <a href="https://github.com/SSujitX"
-                           style="color: #2d8bff; text-decoration: none; font-weight: 500;">
+                           style="color: #4fc3f7; text-decoration: none; font-weight: 500;">
                             GitHub
                         </a>
                     </div>
-                    <div style="font-size: 10pt; color: #00796b; margin-top: 8px;">
+                    <div style="font-size: 10pt; color: #81c784; margin-top: 8px;">
                          Download youtube video or audio with best quality.
                 </div>
                 </div>
@@ -246,7 +273,7 @@ class YouTubeDownloaderApp(QWidget):
         self.video_format_combo = QComboBox()
         self.video_format_combo.addItem("Best Available", "bv")
 
-        self.audio_format_label = QLabel("Audio Format:")  # Label for audio combo
+        self.audio_format_label = QLabel("Audio Format:")
         self.audio_format_combo = QComboBox()
         self.audio_format_combo.addItem("Best Available", "ba")
 
@@ -303,6 +330,16 @@ class YouTubeDownloaderApp(QWidget):
         self.change_folder_button.setObjectName("change_folder_button")
         folder_row_layout.addWidget(self.folder_path_label, 1)
         folder_row_layout.addWidget(self.change_folder_button)
+
+        # Update yt-dlp button (small button below change folder)
+        update_ytdlp_layout = QHBoxLayout()
+        self.update_ytdlp_button = QPushButton("Update yt-dlp")
+        self.update_ytdlp_button.clicked.connect(self.handle_update_ytdlp)
+        self.update_ytdlp_button.setFixedHeight(30)
+        self.update_ytdlp_button.setMinimumWidth(115)
+        self.update_ytdlp_button.setObjectName("UpdateYTDLPButton")
+        update_ytdlp_layout.addWidget(self.update_ytdlp_button)
+        update_ytdlp_layout.addStretch()
         # --- End Folder Section ---
 
         # Add sections to settings layout
@@ -315,6 +352,7 @@ class YouTubeDownloaderApp(QWidget):
         settings_layout.addWidget(folder_group_label)
         settings_layout.addWidget(folder_explanation_label)
         settings_layout.addLayout(folder_row_layout)
+        settings_layout.addLayout(update_ytdlp_layout)
         settings_group.setLayout(settings_layout)
         # --- End Settings Group ---
 
@@ -335,21 +373,21 @@ class YouTubeDownloaderApp(QWidget):
         self.progress.setStyleSheet(
             """
             QProgressBar {
-                border: 1px solid #bfbfbf;
-                border-radius: 10px; /* Match intro radius */
-                background-color: #e0e0e0; /* Lighter gray background */
+                border: 1px solid #2d3748;
+                border-radius: 10px;
+                background-color: #1a202c;
                 text-align: center;
                 font-weight: bold;
-                color: #333;
+                color: #e0e0e0;
             }
             QProgressBar::chunk {
                 background: qlineargradient(
                     spread:pad,
                     x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #007acc, /* Keep gradient for progress */
-                    stop:1 #4db8ff
+                    stop:0 #00d4ff,
+                    stop:1 #667eea
                 );
-                border-radius: 10px; /* Match radius */
+                border-radius: 10px;
             }
         """
         )
@@ -383,7 +421,7 @@ class YouTubeDownloaderApp(QWidget):
         self.last_download_label.setObjectName("LastDownloadLabel")
         self.last_download_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.last_download_label.setStyleSheet(
-            "font-size: 9pt; color: #6c757d; margin-top: 5px; padding-bottom: 5px;"
+            "font-size: 9pt; color: #a0aec0; margin-top: 5px; padding-bottom: 5px;"
         )  # Add styling and bottom padding
         self.last_download_label.setWordWrap(True)  # Allow wrapping if filename is long
         # --- End Label ---
@@ -400,63 +438,73 @@ class YouTubeDownloaderApp(QWidget):
         self.setLayout(layout)
         self.setStyleSheet(
             """
-            QWidget { font-size: 10pt; background-color: #f8f9fa; }
-            QPushButton { background-color: #007bff; color: white; padding: 8px 12px; border-radius: 6px; font-size: 10pt; font-weight: 500; border: none; }
-            QPushButton#change_folder_button { background-color: #6c757d; padding: 5px 10px; font-size: 9pt; } /* Changed color to gray */
-            QPushButton#change_folder_button:hover { background-color: #5a6268; } /* Darker gray on hover */
+            QWidget { font-size: 10pt; background-color: #0f1419; color: #e0e0e0; }
+            QLabel { color: #e0e0e0; }
+            QPushButton { background-color: #00d4ff; color: #0f1419; padding: 8px 12px; border-radius: 6px; font-size: 10pt; font-weight: 600; border: none; }
+            QPushButton#change_folder_button { background-color: #4a5568; color: #e0e0e0; padding: 5px 10px; font-size: 9pt; }
+            QPushButton#change_folder_button:hover { background-color: #5a6c7d; }
             QPushButton#FetchFormatsButton { padding: 6px 10px; font-size: 9pt; margin-left: 5px; }
-            QPushButton:hover { background-color: #0056b3; } /* Default hover, excluding gray button */
-            QPushButton:disabled { background-color: #ced4da; color: #6c757d; }
-            QLineEdit { padding: 8px; border-radius: 4px; border: 1px solid #ced4da; background-color: #ffffff; }
-            QGroupBox { font-weight: bold; margin-top: 12px; margin-bottom: 8px; border: 1px solid #ced4da; border-radius: 6px; padding: 10px 8px 8px 8px; }
-            QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 5px 0 5px; margin-left: 10px; background-color: #f8f9fa; color: #495057; }
-            QCheckBox, QRadioButton { margin-top: 4px; margin-bottom: 4px; margin-left: 5px; font-family: Arial, sans-serif; }
-            
+            QPushButton#UpdateYTDLPButton { background-color: #667eea; color: #ffffff; font-size: 9pt; padding: 4px 8px; }
+            QPushButton#UpdateYTDLPButton:hover { background-color: #5568d3; }
+            QPushButton:hover { background-color: #00b8e6; }
+            QPushButton:disabled { background-color: #2d3748; color: #718096; }
+            QLineEdit { padding: 8px; border-radius: 4px; border: 1px solid #2d3748; background-color: #1a202c; color: #e0e0e0; }
+            QLineEdit:focus { border: 1px solid #00d4ff; }
+            QGroupBox { font-weight: bold; margin-top: 12px; margin-bottom: 8px; border: 1px solid #2d3748; border-radius: 6px; padding: 10px 8px 8px 8px; background-color: #1a1d29; }
+            QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 5px 0 5px; margin-left: 10px; background-color: #0f1419; color: #00d4ff; }
+            QCheckBox, QRadioButton { margin-top: 4px; margin-bottom: 4px; margin-left: 5px; font-family: Arial, sans-serif; color: #e0e0e0; }
+            QCheckBox::indicator, QRadioButton::indicator { width: 16px; height: 16px; border-radius: 3px; border: 1px solid #4a5568; background-color: #1a202c; }
+            QCheckBox::indicator:checked, QRadioButton::indicator:checked { background-color: #00d4ff; border-color: #00d4ff; }
+            QCheckBox::indicator:hover, QRadioButton::indicator:hover { border-color: #00d4ff; }
+
             /* QComboBox Base Style */
-            QComboBox { padding: 3px; border-radius: 4px; border: 1px solid #ced4da; background-color: #ffffff; min-height: 20px; }
-            
+            QComboBox { padding: 3px; border-radius: 4px; border: 1px solid #2d3748; background-color: #1a202c; color: #e0e0e0; min-height: 20px; }
+            QComboBox:hover { border: 1px solid #00d4ff; }
+            QComboBox QAbstractItemView { background-color: #1a202c; color: #e0e0e0; border: 1px solid #2d3748; selection-background-color: #2d3748; }
+
             /* Dropdown Button Style */
             QComboBox::drop-down {
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
-                width: 18px; border-left-width: 1px; border-left-color: #ced4da;
+                width: 18px; border-left-width: 1px; border-left-color: #2d3748;
                 border-left-style: solid; border-top-right-radius: 3px; border-bottom-right-radius: 3px;
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f8f9fa, stop: 1 #e9ecef);
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2d3748, stop: 1 #1a202c);
             }
-            
-            /* NOTE: Scrollbar styling is now applied via python code */
-            
-            /* Other Labels */
-            QLabel#SizeLabel, QLabel#SpeedLabel { font-size: 9pt; color: #495057; padding: 2px 5px 5px 5px; }
-            QLabel#FolderPathLabel { font-size: 7pt; color: #343a40; margin-bottom: 1px; margin-top: 1px; } /* Smaller font, reduced margins */
-            QLabel#ExplanationLabel { font-size: 8pt; color: #6c757d; margin-bottom: 4px; margin-top: 4px; font-style: italic; }
-            QLabel#TitleLabel { font-size: 10pt; color: #212529; font-weight: 500; margin-top: 8px; margin-bottom: 2px; }
-            QGroupBox QLabel { font-weight: normal; }
-            QGroupBox QLabel b { font-weight: bold; }
 
-            /* --- Custom Context Menu Styling --- (NEW) */
+            /* NOTE: Scrollbar styling is now applied via python code */
+
+            /* Other Labels */
+            QLabel { background-color: transparent; }
+            QLabel#SizeLabel, QLabel#SpeedLabel { font-size: 9pt; color: #a0aec0; padding: 2px 5px 5px 5px; }
+            QLabel#FolderPathLabel { font-size: 7pt; color: #cbd5e0; margin-bottom: 1px; margin-top: 1px; }
+            QLabel#ExplanationLabel { font-size: 8pt; color: #718096; margin-bottom: 4px; margin-top: 4px; font-style: italic; }
+            QLabel#TitleLabel { font-size: 10pt; color: #e0e0e0; font-weight: 500; margin-top: 8px; margin-bottom: 2px; }
+            QGroupBox QLabel { font-weight: normal; color: #e0e0e0; background-color: transparent; }
+            QGroupBox QLabel b { font-weight: bold; color: #00d4ff; }
+
+            /* --- Custom Context Menu Styling --- */
             QMenu {
-                background-color: #f8f9fa; /* Light background to match window */
-                border: 1px solid #ced4da; /* Similar border to GroupBox */
-                padding: 5px; /* Padding around items */
+                background-color: #1a202c;
+                border: 1px solid #2d3748;
+                padding: 5px;
                 border-radius: 4px;
             }
             QMenu::item {
-                padding: 5px 20px 5px 20px; /* Padding for each item */
-                color: #212529; /* Dark text color */
-                border-radius: 3px; /* Slight rounding for hover */
+                padding: 5px 20px 5px 20px;
+                color: #e0e0e0;
+                border-radius: 3px;
             }
             QMenu::item:selected {
-                background-color: #e0e7ff; /* Light blue background on hover/selection */
-                color: #004085; /* Darker blue text on hover */
+                background-color: #2d3748;
+                color: #00d4ff;
             }
             QMenu::item:disabled {
-                color: #adb5bd; /* Gray out disabled items */
+                color: #4a5568;
                 background-color: transparent;
             }
             QMenu::separator {
                 height: 1px;
-                background: #ced4da; /* Separator line color */
+                background: #2d3748;
                 margin-left: 10px;
                 margin-right: 10px;
                 margin-top: 3px;
@@ -523,25 +571,25 @@ class YouTubeDownloaderApp(QWidget):
         scrollbar_style = """
             QScrollBar:vertical {
                 border: none;
-                background: #f0f0f0; /* Background of the scrollbar track */
-                width: 8px;       /* Width of the vertical scroll bar */
+                background: #1a202c;
+                width: 8px;
                 margin: 0px 0px 0px 0px;
             }
             QScrollBar::handle:vertical {
-                background: #bdbdbd; /* Color of the scrollbar handle */
+                background: #4a5568;
                 border-radius: 4px;
-                min-height: 20px;   /* Minimum handle height */
+                min-height: 20px;
             }
             QScrollBar::handle:vertical:hover {
-                background: #e7816b; /* Color on hover */
+                background: #00d4ff;
             }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
                 border: none;
-                background: none;   /* Hide the arrows */
+                background: none;
                 height: 0px;
             }
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-                background: none;   /* Hide the page area background */
+                background: none;
             }
         """
         view = combobox.view()
@@ -572,6 +620,10 @@ class YouTubeDownloaderApp(QWidget):
                 self, "Input Error", "Please enter a YouTube URL first."
             )
             return
+
+        url = self.clean_youtube_url(url)
+        self.url_input.setText(url)
+
         self.fetch_formats_button.setEnabled(False)
         self.fetch_formats_button.setText("Fetching...")
         self.title_label.setText("Fetching available formats...")
@@ -645,6 +697,10 @@ class YouTubeDownloaderApp(QWidget):
         # Populate both combo boxes
         for height, fps, fmt_id, desc in video_items:
             self.video_format_combo.addItem(desc, fmt_id)
+
+        self.audio_format_combo.addItem("WAV (Lossless)", "wav")
+        self.audio_format_combo.addItem("MP3 (Best Quality)", "mp3")
+
         for abr, fmt_id, desc in audio_items:
             self.audio_format_combo.addItem(desc, fmt_id)
         QMessageBox.information(
@@ -722,6 +778,9 @@ class YouTubeDownloaderApp(QWidget):
             QMessageBox.warning(self, "Input Error", "Please enter a YouTube URL.")
             return
 
+        url = self.clean_youtube_url(url)
+        self.url_input.setText(url)
+
         # --- Get Selected Download Type and Format ---
         format_string = None  # Default
 
@@ -733,8 +792,13 @@ class YouTubeDownloaderApp(QWidget):
                 format_string = f"{vid}+ba"  # Combine specific video + best audio
 
         elif self.audio_radio.isChecked():  # Download Audio selected
-            aid = self.audio_format_combo.currentData()  # Get audio format (ba or ID)
-            format_string = aid  # Use the selected audio format ID (or 'ba')
+            aid = self.audio_format_combo.currentData()  # Get audio format (ba, wav, mp3, or ID)
+            if aid == "ba":
+                format_string = "mp3"  # Best Available defaults to MP3
+            elif aid in ["wav", "mp3"]:
+                format_string = aid  # WAV or MP3 conversion
+            else:
+                format_string = f"{aid}"  # Specific audio format ID - download directly
 
         else:  # Should not happen with radio buttons, but good practice
             QMessageBox.warning(
@@ -759,6 +823,9 @@ class YouTubeDownloaderApp(QWidget):
                 f"Could not create download directory:\n{self.current_download_dir}\nError: {e}",
             )
             return
+
+        # Track existing files before download
+        self.files_before_download = set(os.listdir(self.current_download_dir))
 
         self.title_label.setText("Starting download...")  # Set status
         self.progress.setValue(0)
@@ -791,64 +858,19 @@ class YouTubeDownloaderApp(QWidget):
 
         if result["status"] and result["filepath"]:
             original_filepath = result["filepath"]
-            # --- Renaming Logic --- START ---
-            try:
-                # Determine selected format description
-                format_desc = ""
-                format_data = ""
-                if self.video_radio.isChecked():
-                    format_desc = self.video_format_combo.currentText()
-                    format_data = self.video_format_combo.currentData()
-                elif self.audio_radio.isChecked():
-                    format_desc = self.audio_format_combo.currentText()
-                    format_data = self.audio_format_combo.currentData()
 
-                # Only rename if a specific format was selected (not 'Best Available')
-                # and we have a title stored
-                if format_data not in ["bv", "ba"] and self.current_video_title:
-                    base_title = self.current_video_title
-                    # Simplify format description (remove size estimate)
-                    format_part = re.sub(r"\s*\([^)]*Size\)$", "", format_desc).strip()
-                    sanitized_title = self.sanitize_filename(base_title)
-                    sanitized_format = self.sanitize_filename(format_part)
-                    # Get extension from original path
-                    _, ext = os.path.splitext(original_filepath)
-                    # Construct new name
-                    new_filename = f"{sanitized_title} - {sanitized_format}{ext}"
-                    new_filepath_attempt = os.path.join(
-                        self.current_download_dir, new_filename
-                    )
-
-                    # Rename the file
-                    if original_filepath != new_filepath_attempt:
-                        if os.path.exists(new_filepath_attempt):
-                            # Handle existing file (e.g., add counter, overwrite, or skip)
-                            # For now, just log a warning and don't rename
-                            print(
-                                f"Warning: File '{new_filename}' already exists. Skipping rename."
-                            )
-                            new_filepath = original_filepath  # Keep original path
-                        else:
-                            os.rename(original_filepath, new_filepath_attempt)
-                            new_filepath = (
-                                new_filepath_attempt  # Update path to new one
-                            )
-                            print(
-                                f"Renamed '{os.path.basename(original_filepath)}' to '{new_filename}'"
-                            )
-                    else:
-                        new_filepath = original_filepath  # No rename needed
+            if not os.path.exists(original_filepath):
+                files = [f for f in os.listdir(self.current_download_dir) if os.path.isfile(os.path.join(self.current_download_dir, f))]
+                if files:
+                    files_sorted = sorted(files, key=lambda f: os.path.getmtime(os.path.join(self.current_download_dir, f)), reverse=True)
+                    original_filepath = os.path.join(self.current_download_dir, files_sorted[0])
                 else:
-                    # Keep original path if 'Best Available' or no title
-                    new_filepath = original_filepath
-            except Exception as e:
-                print(f"Error during file rename: {e}")
-                QMessageBox.warning(
-                    self,
-                    "Rename Warning",
-                    f"Could not rename file after download:\n{e}",
-                )
-                new_filepath = original_filepath  # Fallback to original path
+                    new_filepath = None
+
+            if original_filepath and os.path.exists(original_filepath):
+                new_filepath = original_filepath
+            else:
+                new_filepath = None
             # --- Renaming Logic --- END ---
 
             # Update result with the potentially new filepath
@@ -860,6 +882,23 @@ class YouTubeDownloaderApp(QWidget):
                     size_bytes = os.path.getsize(new_filepath)
                     size_str = self.format_bytes(size_bytes)
                     self.size_label.setText(f"Size: {size_str} / {size_str}")
+
+                    # Delete only temporary files created during this download
+                    try:
+                        current_files = set(os.listdir(self.current_download_dir))
+                        new_files = current_files - self.files_before_download
+                        final_filename = os.path.basename(new_filepath)
+
+                        for filename in new_files:
+                            if filename != final_filename:
+                                filepath = os.path.join(self.current_download_dir, filename)
+                                if os.path.isfile(filepath):
+                                    os.remove(filepath)
+                                    # Removed print to prevent console window
+                    except Exception:
+                        # Removed print to prevent console window
+                        pass
+
                 except Exception:
                     self.size_label.setText("Size: N/A")  # Reset if error getting size
             else:  # If filepath became None due to rename error
@@ -1005,6 +1044,53 @@ class YouTubeDownloaderApp(QWidget):
                 )
 
     # --- End open_folder ---
+
+    # --- Update yt-dlp handlers --- (NEW)
+    def handle_update_ytdlp(self):
+        self.update_ytdlp_button.setEnabled(False)
+        self.update_ytdlp_button.setText("Updating...")
+        self.title_label.setText("Updating yt-dlp...")
+
+        self.update_thread = UpdateYTDLPThread()
+        self.update_thread.update_progress.connect(self.on_update_progress)
+        self.update_thread.update_finished.connect(self.on_update_finished)
+        self.update_thread.start()
+
+    def on_update_progress(self, message):
+        self.title_label.setText(message)
+
+    def on_update_finished(self, success, message):
+        self.update_ytdlp_button.setEnabled(True)
+        self.update_ytdlp_button.setText("Update yt-dlp")
+        self.title_label.setText(" ")
+
+        if success:
+            QMessageBox.information(self, "Update Successful", message)
+        else:
+            QMessageBox.critical(self, "Update Failed", message)
+
+    # --- End update yt-dlp handlers ---
+
+    # --- Utility Methods ---
+    def clean_youtube_url(self, url):
+        """Remove playlist/list parameters from YouTube URL, keep only video ID"""
+        try:
+            # Extract video ID from various YouTube URL formats
+            # Patterns: watch?v=ID, youtu.be/ID, embed/ID, v/ID
+            patterns = [
+                r'(?:v=|/)([0-9A-Za-z_-]{11}).*',
+                r'youtu\.be/([0-9A-Za-z_-]{11}).*',
+            ]
+
+            for pattern in patterns:
+                match = re.search(pattern, url)
+                if match:
+                    video_id = match.group(1)
+                    return f"https://www.youtube.com/watch?v={video_id}"
+
+            return url
+        except:
+            return url
 
     def format_bytes(self, size_bytes):
         if size_bytes is None or size_bytes <= 0:
