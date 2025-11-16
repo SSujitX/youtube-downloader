@@ -14,3 +14,4 @@ youtube_downloader.spec
 
 # Virtual environments
 .venv
+.claude
